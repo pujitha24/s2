@@ -146,12 +146,12 @@ impl ErrorCode {
             | Self::ServerDraining
             | Self::StreamDeletionPending
             | Self::StreamNotFound
-            | Self::TransactionConflict => true,
+            | Self::TransactionConflict
+            | Self::Unavailable => true,
             Self::ClientHangup
             | Self::Other
             | Self::RequestTimeout
             | Self::Storage
-            | Self::Unavailable
             | Self::UpstreamTimeout => false,
         }
     }

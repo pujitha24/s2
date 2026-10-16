@@ -1644,8 +1644,8 @@ mod tests {
     #[rstest::rstest]
     #[case(StatusCode::FORBIDDEN, "permission_denied", false, false)]
     #[case(StatusCode::FORBIDDEN, "permission_denied", true, true)]
-    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", false, false)]
-    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", true, false)]
+    #[case(StatusCode::INTERNAL_SERVER_ERROR, "other", false, false)]
+    #[case(StatusCode::INTERNAL_SERVER_ERROR, "other", true, false)]
     #[case(StatusCode::TOO_MANY_REQUESTS, "rate_limited", true, true)]
     #[test]
     fn unary_append_failure_preserves_uncertainty_and_final_error(

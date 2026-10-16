@@ -542,6 +542,13 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_is_retryable_and_side_effect_free() {
+        let unavailable = response(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
+        assert!(unavailable.is_retryable());
+        assert!(unavailable.has_no_side_effects());
+    }
+
+    #[test]
     fn unknown_codes_retain_retryable_status_fallback() {
         let unknown = response(StatusCode::SERVICE_UNAVAILABLE, "future_server_error");
         assert!(unknown.is_retryable());
