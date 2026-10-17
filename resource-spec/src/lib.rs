@@ -505,6 +505,16 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_sub_second_retention_policy() {
+        let spec = parse_spec(
+            r#"{"basins":[{"name":"my-basin","config":{"default_stream_config":{"retention_policy":"500ms"}}}]}"#,
+        );
+        let err = validate(&spec).unwrap_err();
+        assert!(err.contains("basin \"my-basin\" default_stream_config"));
+        assert!(err.contains("age must be a whole number of seconds"));
+    }
+
+    #[test]
     fn deserialize_invalid_basin_name() {
         let err = parse_spec_err(r#"{"basins":[{"name":"INVALID_BASIN"}]}"#);
         assert!(err.to_string().contains("basin name"));

@@ -49,6 +49,9 @@ impl RetentionPolicy {
             Self::Age(duration) if duration.is_zero() => Err(ValidationError(
                 "age must be greater than 0 seconds".to_string(),
             )),
+            Self::Age(duration) if duration.subsec_nanos() != 0 => Err(ValidationError(
+                "age must be a whole number of seconds".to_string(),
+            )),
             policy => Ok(policy),
         }
     }
