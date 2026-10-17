@@ -842,7 +842,7 @@ async fn resend(
                     timer.as_mut().fire_at(
                         TimerEvent::AckDeadline,
                         inflight_append.ack_deadline,
-                        CoalesceMode::Latest,
+                        CoalesceMode::Earliest,
                     );
                     input_tx_permit.send(inflight_append.input.clone());
                     resend_index += 1;
@@ -864,6 +864,11 @@ async fn resend(
                                 "received ack without a corresponding resent append in flight".to_string(),
                             )
                         })?;
+                        if resend_index == 0 {
+                            // The oldest remaining append has not been resent yet, so its
+                            // deadline is stale; the next resend will arm the timer.
+                            timer.as_mut().cancel(TimerEvent::AckDeadline);
+                        }
                     }
                     Some(Err(err)) => {
                         return Err(err.into());
@@ -1114,14 +1119,118 @@ mod tests {
 
     use http::StatusCode;
 
-    use super::{AppendSessionError, is_safe_to_retry};
+    use std::{collections::VecDeque, time::Duration};
+
+    use futures_util::stream;
+    use tokio::{
+        sync::{mpsc, oneshot},
+        time::Instant,
+    };
+
+    use super::{AppendSessionError, InflightAppend, SessionState, is_safe_to_retry, resend};
     use crate::{
         api::{ApiError, ServerErrorBody},
         error::{AppendError, ProducerError, RequestError},
         frame_signal::FrameSignal,
         retry::AppendRetryError,
-        types::{AccessTokenMode, AppendRetryPolicy},
+        types::{
+            AccessTokenMode, AppendAck, AppendInput, AppendRecord, AppendRecordBatch,
+            AppendRetryPolicy, StreamPosition,
+        },
     };
+
+    fn test_state(n: usize) -> SessionState {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+        let inflight_appends = (0..n)
+            .map(|_| {
+                let batch =
+                    AppendRecordBatch::try_from_iter([AppendRecord::new("x").unwrap()]).unwrap();
+                InflightAppend {
+                    input: AppendInput::new(batch),
+                    input_metered_bytes: 0,
+                    ack_tx: oneshot::channel().0,
+                    ack_deadline: Instant::now(),
+                    _permit: None,
+                    prior_uncertainty: false,
+                }
+            })
+            .collect::<VecDeque<_>>();
+        SessionState {
+            cmd_rx,
+            inflight_appends,
+            inflight_bytes: 0,
+            close_tx: None,
+            total_records: 0,
+            total_acked_records: 0,
+            prev_ack_end: None,
+            stashed_submission: None,
+        }
+    }
+
+    // A slow server that drains the input channel one append at a time.
+    fn slow_drain(delay: Duration) -> (mpsc::Sender<AppendInput>, tokio::task::JoinHandle<()>) {
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let drain = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(delay).await;
+                if input_rx.recv().await.is_none() {
+                    break;
+                }
+            }
+        });
+        (input_tx, drain)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resend_ack_timeout_tracks_oldest_unacked_append() {
+        let ack_timeout = Duration::from_secs(10);
+        let mut state = test_state(3);
+        let (input_tx, drain) = slow_drain(Duration::from_secs(4));
+        let mut acks: crate::api::Streaming<crate::types::AppendAck> = Box::pin(stream::pending());
+
+        let start = Instant::now();
+        let result = resend(&mut state, &input_tx, &mut acks, ack_timeout).await;
+
+        assert!(matches!(result, Err(AppendSessionError::AckTimeout)));
+        assert_eq!(start.elapsed(), ack_timeout);
+        drain.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resend_ack_timeout_ignores_stale_deadline_of_unsent_append() {
+        let ack_timeout = Duration::from_secs(10);
+        let mut state = test_state(2);
+        // The second append is only dispatched at t=8s, after the first is acked at t=1s.
+        let (input_tx, drain) = slow_drain(Duration::from_secs(8));
+        let (ack_tx, ack_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let pos = |seq_num| StreamPosition {
+                seq_num,
+                timestamp: 0,
+            };
+            let _ = ack_tx
+                .send(Ok(AppendAck {
+                    start: pos(0),
+                    end: pos(1),
+                    tail: pos(1),
+                }))
+                .await;
+            std::future::pending::<()>().await;
+        });
+        let mut acks: crate::api::Streaming<AppendAck> = Box::pin(tokio_stream_from(ack_rx));
+
+        let start = Instant::now();
+        let result = resend(&mut state, &input_tx, &mut acks, ack_timeout).await;
+
+        assert!(matches!(result, Err(AppendSessionError::AckTimeout)));
+        assert_eq!(start.elapsed(), Duration::from_secs(8) + ack_timeout);
+        drain.abort();
+    }
+
+    fn tokio_stream_from<T>(mut rx: mpsc::Receiver<T>) -> impl futures_util::Stream<Item = T> {
+        stream::poll_fn(move |cx| rx.poll_recv(cx))
+    }
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
         AppendSessionError::Append(AppendError::Request(RequestError::from(ApiError::Server(
