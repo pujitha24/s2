@@ -34,7 +34,12 @@ impl Backend {
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = processed.next().await {
-            progress.record(result?);
+            match result {
+                Ok(item) => progress.record(item),
+                // Leave this basin pending; the rest of the page keeps draining.
+                Err(err) if err.is_transaction_conflict() => progress.record(ItemProgress::Blocked),
+                Err(err) => return Err(err),
+            }
         }
         Ok(progress.should_continue())
     }
@@ -210,6 +215,29 @@ mod tests {
             );
         }
         backend.db.write(batch).assert_durable().await;
+    }
+
+    #[test]
+    fn transaction_conflicts_are_classified() {
+        use crate::backend::error::{
+            BasinDeletionError, DeleteStreamError, StreamNotFoundError, TransactionConflictError,
+        };
+
+        assert!(
+            BasinDeletionError::DeleteStream(DeleteStreamError::TransactionConflict(
+                TransactionConflictError
+            ))
+            .is_transaction_conflict()
+        );
+        assert!(
+            !BasinDeletionError::DeleteStream(DeleteStreamError::StreamNotFound(
+                StreamNotFoundError {
+                    basin: BasinName::from_str("test-basin").unwrap(),
+                    stream: StreamName::from_str("s").unwrap(),
+                }
+            ))
+            .is_transaction_conflict()
+        );
     }
 
     #[tokio::test]
