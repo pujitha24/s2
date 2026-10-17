@@ -79,7 +79,8 @@ pub enum CliError {
     #[error("Failed to initialize S2 SDK")]
     #[diagnostic(help(
         "Token loaded from {1}. Verify it does not contain invalid characters.\n\
-         Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`.\n\n{}",
+         {}\n\n{}",
+        .1.recovery_command(),
         HELP
     ))]
     MalformedAccessToken(#[source] SdkError, TokenSource),
@@ -107,7 +108,8 @@ pub enum CliError {
     #[error("{}: {}", .0, .1)]
     #[diagnostic(help(
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n\
-         Store one with `s2 auth access-token set`, or set `S2_ACCESS_TOKEN`."
+         {}",
+        .2.recovery_command()
     ))]
     UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
@@ -237,6 +239,18 @@ impl std::fmt::Display for TokenSource {
     }
 }
 
+impl TokenSource {
+    pub fn recovery_command(self) -> &'static str {
+        match self {
+            TokenSource::BrowserLogin => "Run `s2 login` again.",
+            TokenSource::Environment => "Set S2_ACCESS_TOKEN to a valid access token.",
+            TokenSource::StoredAccessToken | TokenSource::ConfigFile => {
+                "Run `s2 auth access-token set` to replace it."
+            }
+        }
+    }
+}
+
 fn is_auth_error(err: &SdkError) -> bool {
     err.server_error()
         .and_then(ServerError::known_code)
@@ -360,5 +374,30 @@ impl From<config::ConfigError> for CliConfigError {
     fn from(_error: config::ConfigError) -> Self {
         // Parser errors can include source excerpts containing a legacy plaintext token.
         Self::Load
+    }
+}
+
+#[cfg(test)]
+mod token_source_tests {
+    use super::TokenSource;
+
+    #[test]
+    fn recovery_command_matches_token_source() {
+        assert_eq!(
+            TokenSource::BrowserLogin.recovery_command(),
+            "Run `s2 login` again."
+        );
+        assert!(
+            TokenSource::Environment
+                .recovery_command()
+                .contains("S2_ACCESS_TOKEN")
+        );
+        for source in [TokenSource::StoredAccessToken, TokenSource::ConfigFile] {
+            assert!(
+                source
+                    .recovery_command()
+                    .contains("s2 auth access-token set")
+            );
+        }
     }
 }
