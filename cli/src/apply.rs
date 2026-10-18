@@ -271,9 +271,20 @@ fn default_stream_config_field(field: &'static str) -> &'static str {
     }
 }
 
+/// Stream config defaults carrying only the location's default storage class,
+/// used to resolve an omitted storage class on the existing side the same way
+/// it is predicted for the desired side.
+fn location_defaults(default_storage_class: Option<&str>) -> s2_api::v1::config::StreamConfig {
+    s2_api::v1::config::StreamConfig {
+        storage_class: default_storage_class.map(Into::into),
+        ..Default::default()
+    }
+}
+
 fn diff_basin_config(
     existing: &BasinConfig,
     desired: &BasinConfig,
+    default_storage_class: Option<&str>,
 ) -> miette::Result<Vec<FieldDiff>> {
     let mut diffs = Vec::new();
 
@@ -315,7 +326,7 @@ fn diff_basin_config(
             .clone()
             .unwrap_or_default()
             .into(),
-        Default::default(),
+        location_defaults(default_storage_class),
     )
     .into_diagnostic()?;
     let desired_dsc = resolve_stream_config(
@@ -594,7 +605,11 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
 
         let basin_action = match s2.get_basin_config(basin_spec.name.clone()).await {
             Ok(existing) => {
-                let diffs = diff_basin_config(&existing, &desired_basin_config)?;
+                let diffs = diff_basin_config(
+                    &existing,
+                    &desired_basin_config,
+                    default_storage_class.as_deref(),
+                )?;
                 ResourceAction::from_diff(diffs, desired_basin_defaults.storage_class.is_none())
             }
             Err(e) if is_not_found_error(&e) => ResourceAction::Create,
@@ -624,8 +639,11 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
                 .await
             {
                 Ok(existing) => {
-                    let existing = resolve_stream_config(existing.into(), Default::default())
-                        .into_diagnostic()?;
+                    let existing = resolve_stream_config(
+                        existing.into(),
+                        location_defaults(default_storage_class.as_deref()),
+                    )
+                    .into_diagnostic()?;
                     let desired_stream_config = resolve_stream_config(
                         stream_spec
                             .config
@@ -669,4 +687,27 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_storage_class_on_existing_resolves_to_location_default() {
+        let existing = BasinConfig::new();
+        let desired = BasinConfig::new().with_default_stream_config(
+            s2_sdk::types::StreamConfig::new().with_storage_class("express"),
+        );
+
+        assert!(
+            diff_basin_config(&existing, &desired, Some("express"))
+                .unwrap()
+                .is_empty()
+        );
+
+        let diffs = diff_basin_config(&existing, &desired, Some("standard")).unwrap();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].field, "default_stream_config.storage_class");
+    }
 }
