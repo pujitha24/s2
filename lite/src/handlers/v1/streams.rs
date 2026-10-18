@@ -26,6 +26,17 @@ pub fn router() -> axum::Router<Backend> {
             super::paths::streams::RECONFIGURE,
             patch(reconfigure_stream),
         )
+        // An unencoded '/' in a stream name yields more path segments than any
+        // route expects, which would otherwise be a bare, bodyless 404. Literal
+        // routes (e.g. `.../records`) take precedence over this wildcard.
+        .route(
+            "/streams/{stream}/{*rest}",
+            axum::routing::any(ambiguous_stream_path),
+        )
+}
+
+async fn ambiguous_stream_path() -> ServiceError {
+    ServiceError::AmbiguousStreamPath
 }
 
 #[derive(FromRequest)]
@@ -488,6 +499,46 @@ mod test {
                 .contains(expected_message),
             "unexpected message: {error}"
         );
+
+        backend.close().await.expect("close backend");
+    }
+
+    #[tokio::test]
+    async fn unencoded_slash_in_stream_name_returns_bad_path_hint() {
+        let (app, backend, basin) = setup_app("unencoded-slash").await;
+
+        let response = send(
+            &app,
+            Request::builder()
+                .method("GET")
+                .uri("/v1/streams/cdc/products/records?seq_num=0&count=1")
+                .header(BASIN_HEADER.as_str(), basin.as_ref())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "bad_path");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("percent-encoded")
+        );
+
+        let response = send(
+            &app,
+            Request::builder()
+                .method("GET")
+                .uri("/v1/streams/cdc%2Fproducts/records?seq_num=0&count=1")
+                .header(BASIN_HEADER.as_str(), basin.as_ref())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let json = response_json(response).await;
+        assert_ne!(json["code"], "bad_path");
 
         backend.close().await.expect("close backend");
     }
