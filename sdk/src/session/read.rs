@@ -503,9 +503,7 @@ pub async fn read_session(
                         retry_backoff.reset();
                     }
 
-                    if batch.tail.is_some() {
-                        last_tail_at = Some(Instant::now());
-                    }
+                    update_wait_anchor(&mut last_tail_at, &batch);
 
                     update_resume_start(&mut start, &batch);
                     if let Some(count) = end.count.as_mut() {
@@ -624,12 +622,27 @@ fn read_limits_exhausted(end: &ReadEnd) -> bool {
     end.count == Some(0) || end.bytes == Some(0)
 }
 
+/// Track the instant the server's finite wait deadline was last (re)armed.
+///
+/// The first heartbeat (an empty batch with tail info) arms the wait. Later
+/// heartbeats do not move the server's deadline, so they must not move the
+/// anchor either; only records arriving after it is armed reset it. Catch-up
+/// batches never arm it.
+fn update_wait_anchor(anchor: &mut Option<Instant>, batch: &ReadBatch) {
+    if batch.records.is_empty() {
+        if batch.tail.is_some() && anchor.is_none() {
+            *anchor = Some(Instant::now());
+        }
+    } else if anchor.is_some() {
+        *anchor = Some(Instant::now());
+    }
+}
+
 /// Compute the remaining wait budget for a retry.
 ///
-/// During catchup (tail not yet observed), the full wait is sent.
-/// Once tailing, the wait budget is depleted based on time since
-/// the last batch with tail info, which approximates how long the
-/// server has been in its long polling state.
+/// Until the wait is armed (first heartbeat), the full wait is sent.
+/// Once armed, the budget is depleted by the time since the server's
+/// deadline was last armed or reset by records.
 fn remaining_wait(baseline_wait: Option<u32>, last_tail_at: Option<Instant>) -> Option<u32> {
     baseline_wait.map(|w| match last_tail_at {
         Some(since) => w.saturating_sub(since.elapsed().as_secs() as u32),
@@ -799,6 +812,30 @@ mod tests {
         assert_eq!(session.resume_seq_num(), Some(3));
         assert_eq!(caught_up.await.unwrap(), tail);
         assert_eq!(caught_up_while_caught.await.unwrap(), tail);
+    }
+
+    #[test]
+    fn wait_anchor_arms_on_first_heartbeat_only() {
+        let tail = position(2);
+        let mut anchor = None;
+
+        // Catch-up batch with records and tail does not arm the wait.
+        update_wait_anchor(&mut anchor, &batch(vec![record(0, false)], Some(tail)));
+        assert!(anchor.is_none());
+        assert_eq!(remaining_wait(Some(60), anchor), Some(60));
+
+        // First heartbeat arms it.
+        update_wait_anchor(&mut anchor, &batch(Vec::new(), Some(tail)));
+        let armed = anchor.expect("heartbeat should arm the wait");
+
+        // Later heartbeats do not move the anchor.
+        std::thread::sleep(Duration::from_millis(5));
+        update_wait_anchor(&mut anchor, &batch(Vec::new(), Some(tail)));
+        assert_eq!(anchor, Some(armed));
+
+        // Records after arming reset it.
+        update_wait_anchor(&mut anchor, &batch(vec![record(2, false)], Some(tail)));
+        assert!(anchor.unwrap() > armed);
     }
 
     #[tokio::test]
