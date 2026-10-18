@@ -154,7 +154,7 @@ fn pipe<T>(pipe: Option<T>) -> eyre::Result<T> {
 struct StreamComparison {
     name: &'static str,
     first_mismatch: Option<Mismatch>,
-    /// Lines read from the first stream.
+    /// Lines compared (rounds in which either stream yielded data).
     lines: usize,
 }
 
@@ -201,7 +201,7 @@ fn compare_streams(
         if read_a == 0 && read_b == 0 {
             break;
         }
-        if read_a > 0 {
+        if read_a > 0 || read_b > 0 {
             lines += 1;
         }
         if line_a != line_b {
@@ -265,4 +265,35 @@ fn history_file_names(dir: &Path) -> eyre::Result<BTreeSet<String>> {
         }
     }
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatch_line_when_first_stream_ends_early() {
+        let cmp = compare_streams("stdout", &b"a\nb\nc\n"[..], &b"a\nb\nc\nd\n"[..]).unwrap();
+        let m = cmp.first_mismatch.unwrap();
+        assert_eq!(m.line, 4);
+        assert_eq!(m.a, "");
+        assert_eq!(m.b, "d");
+    }
+
+    #[test]
+    fn mismatch_line_when_second_stream_ends_early() {
+        let cmp = compare_streams("stdout", &b"a\nb\nc\nd\n"[..], &b"a\nb\nc\n"[..]).unwrap();
+        assert_eq!(cmp.first_mismatch.unwrap().line, 4);
+    }
+
+    #[test]
+    fn identical_streams_count_lines() {
+        let cmp = compare_streams("stdout", &b"a
+b
+c"[..], &b"a
+b
+c"[..]).unwrap();
+        assert!(cmp.first_mismatch.is_none());
+        assert_eq!(cmp.lines, 3);
+    }
 }
